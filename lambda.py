@@ -1,3 +1,4 @@
+import boto3
 import tarfile
 import os
 import shutil
@@ -68,11 +69,18 @@ def get_note_creation_date(note_file: str) -> str:
     # Finally then get the stats of the file
     # and return the oldest date
     stats = os.stat(note_file)
+
+    # birthtime can fail
+    try:
+        birthtime = (datetime.fromtimestamp(stats.st_birthtime),)
+    except Exception as e:
+        birthtime = datetime.fromtimestamp(1)
+
     dates = [
         datetime.fromtimestamp(stats.st_ctime),
         datetime.fromtimestamp(stats.st_mtime),
         datetime.fromtimestamp(stats.st_atime),
-        datetime.fromtimestamp(stats.st_birthtime),
+        birthtime,
     ]
     # Remove all older than 1990 to make sure
     dates = [d for d in dates if d.year > 1990]
@@ -102,12 +110,45 @@ def note_to_json(note_file: str) -> dict:
     return data
 
 
-def main():
-    compressed_file = "2023-07-23_15-00-00.tar.gz"
-    vault = "vault"
-    decompress(compressed_file, vault)
+def upload_directory_to_s3(local_dir, bucket_name):
+    s3 = boto3.client("s3")
 
-    # Walk through vault and remove all files that are not .md
+    for root, dirs, files in os.walk(local_dir):
+        for file in files:
+            local_path = os.path.join(root, file)
+            relative_path = os.path.relpath(local_path, local_dir)
+            s3_path = os.path.join(bucket_name, relative_path).replace("\\", "/")
+
+            # Remove the leading directory name (vault) from the S3 path
+            # to upload directly to the root of the bucket
+            s3_path = "/".join(s3_path.split("/")[1:])
+
+            s3.upload_file(local_path, bucket_name, s3_path)
+
+
+def lambda_handler(event, context):
+    source_bucket = "source"
+    destination_bucket = "dest"
+
+    s3_client = boto3.client("s3")
+
+    # List all objects in the source bucket
+    response = s3_client.list_objects_v2(Bucket=source_bucket)
+
+    # Find the latest zip file (assuming zip files have a .zip extension)
+    latest_zip_key = max(response["Contents"], key=lambda obj: obj["LastModified"])[
+        "Key"
+    ]
+
+    # Download the latest zip file to the /var/task directory
+    tmp_file = os.path.join("/tmp", latest_zip_key)
+    s3_client.download_file(source_bucket, latest_zip_key, tmp_file)
+
+    vault = "/tmp/vault"
+
+    decompress(tmp_file, vault)
+
+    # Walk through the lambda_tmp_dir and remove all files that are not .md
     # Also remove directories that start with . or _
     for root, dirs, files in os.walk(vault):
         for dir in dirs:
@@ -117,7 +158,7 @@ def main():
             if not file.endswith(".md"):
                 os.remove(os.path.join(root, file))
 
-    # Walk again through vault and convert all .md files to JSON
+    # Walk again through lambda_tmp_dir and convert all .md files to JSON
     # delete the .md file
     for root, dirs, files in os.walk(vault):
         for file in files:
@@ -132,6 +173,14 @@ def main():
 
             os.remove(note)
 
+    # Delete everything from the destination bucket
+    s3_resource = boto3.resource("s3")
+    s3_resource.Bucket(destination_bucket).objects.all().delete()
 
-if __name__ == "__main__":
-    main()
+    # # Upload the modified contents of the lambda_tmp_dir to the destination bucket
+    upload_directory_to_s3(vault, destination_bucket)
+
+    return {
+        "statusCode": 200,
+        "body": "Latest zip file processed and uploaded successfully!",
+    }
