@@ -3,6 +3,7 @@ import tarfile
 import os
 import shutil
 from datetime import datetime
+import pathlib
 import json
 
 
@@ -89,8 +90,10 @@ def get_note_creation_date(note_file: str) -> str:
 
 def note_to_json(note_file: str) -> dict:
     stats = os.stat(note_file)
-    path = os.path.dirname(note_file).split("/")[-1]
-    folder = os.path.dirname(path).split("/")[-1]
+    # Path is everything except the final file and the vault
+    path = "/".join(note_file.split("/")[1:-1])
+    # Folder is the last folder in the path
+    folder = path.split("/")[-1]
 
     with open(note_file, "r") as f:
         content = f.read()
@@ -172,6 +175,29 @@ def lambda_handler(event, context):
                 json.dump(data, f)
 
             os.remove(note)
+
+    # Get all directories directly under vault with the /vault in front
+    first_level = [os.path.join(vault, d) for d in os.listdir(vault)]
+
+    # Go over each folder in the first level
+    # get all their files and move them to the first level.
+    # Afterward deletes every file under each first level.
+    for folder in first_level:
+        # Get, recursively, all files under this folder
+        files = list(pathlib.Path(folder).rglob("*.*"))
+        # Move each file to the first level if its not already there
+        for file in files:
+            if file.parent != pathlib.Path(vault):
+                try:
+                    shutil.move(file, folder)
+                except Exception as e:
+                    pass
+
+        # List all directories under this folder
+        dirs = [d for d in os.listdir(folder) if os.path.isdir(os.path.join(folder, d))]
+        # Delete each directory
+        for dir in dirs:
+            shutil.rmtree(os.path.join(folder, dir))
 
     # Delete everything from the destination bucket
     s3_resource = boto3.resource("s3")

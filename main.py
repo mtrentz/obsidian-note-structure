@@ -1,6 +1,7 @@
 import tarfile
 import os
 import shutil
+import pathlib
 from datetime import datetime
 import json
 
@@ -81,8 +82,10 @@ def get_note_creation_date(note_file: str) -> str:
 
 def note_to_json(note_file: str) -> dict:
     stats = os.stat(note_file)
-    path = os.path.dirname(note_file).split("/")[-1]
-    folder = os.path.dirname(path).split("/")[-1]
+    # Path is everything except the final file and the vault
+    path = "/".join(note_file.split("/")[1:-1])
+    # Folder is the last folder in the path
+    folder = path.split("/")[-1]
 
     with open(note_file, "r") as f:
         content = f.read()
@@ -105,12 +108,14 @@ def note_to_json(note_file: str) -> dict:
 def main():
     compressed_file = "2023-07-23_15-00-00.tar.gz"
     vault = "vault"
+    # Delete folder vault
+    shutil.rmtree(vault, ignore_errors=True)
     decompress(compressed_file, vault)
 
     # Walk through vault and remove all files that are not .md
     # Also remove directories that start with . or _
-    for root, dirs, files in os.walk(vault):
-        for dir in dirs:
+    for root, first_level, files in os.walk(vault):
+        for dir in first_level:
             if dir.startswith(".") or dir.startswith("_"):
                 shutil.rmtree(os.path.join(root, dir))
         for file in files:
@@ -119,7 +124,7 @@ def main():
 
     # Walk again through vault and convert all .md files to JSON
     # delete the .md file
-    for root, dirs, files in os.walk(vault):
+    for root, first_level, files in os.walk(vault):
         for file in files:
             if not file.endswith(".md"):
                 continue
@@ -131,6 +136,34 @@ def main():
                 json.dump(data, f)
 
             os.remove(note)
+
+    # Now I will only keep the highest level folders
+    # inside the 'vault.
+    # All files below this first level will be moved
+    # to their parent folder and the folder will be deleted
+
+    # Get all directories directly under vault with the /vault in front
+    first_level = [os.path.join(vault, d) for d in os.listdir(vault)]
+
+    # Go over each folder in the first level
+    # get all their files and move them to the first level.
+    # Afterward deletes every file under each first level.
+    for folder in first_level:
+        # Get, recursively, all files under this folder
+        files = list(pathlib.Path(folder).rglob("*.*"))
+        # Move each file to the first level if its not already there
+        for file in files:
+            if file.parent != pathlib.Path(vault):
+                try:
+                    shutil.move(file, folder)
+                except Exception as e:
+                    pass
+
+        # List all directories under this folder
+        dirs = [d for d in os.listdir(folder) if os.path.isdir(os.path.join(folder, d))]
+        # Delete each directory
+        for dir in dirs:
+            shutil.rmtree(os.path.join(folder, dir))
 
 
 if __name__ == "__main__":
